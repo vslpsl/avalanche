@@ -1,0 +1,129 @@
+# Demonstrates the --role instance-role split (see README.md #instance-roles)
+# against a real target Prometheus:
+#   - 3x scrape-target : Prometheus scrapes their /metrics.
+#   - 2x remote-writer  : push samples to Prometheus via remote_write.
+#   - 1x ruler          : generates recording/alerting rules, served on /rules;
+#                         fetched once at startup into Prometheus's rule_files.
+#
+# All avalanche instances share the exact same metric-generation config
+# (~100,000 series: 500 gauges + 500 counters, 100 series each) via the
+# AVALANCHE_* environment anchor below -- only --role (and, for the
+# remote-writers, AVALANCHE_REMOTE_URL) differs per instance. There is no
+# series sharding in this build: each scrape-target replica independently
+# generates and exposes the SAME 100,000 series (redundant, not
+# partitioned) -- see openspec/changes/add-instance-roles/design.md Risks.
+#
+# Run with: docker compose up --build
+
+x-avalanche-image: &avalanche-image
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: avalanche-instance-roles:local
+
+x-avalanche-env: &avalanche-env
+  AVALANCHE_GAUGE_METRIC_COUNT: "500"
+  AVALANCHE_COUNTER_METRIC_COUNT: "500"
+  AVALANCHE_SERIES_COUNT: "100"
+  AVALANCHE_LABEL_COUNT: "10"
+  AVALANCHE_VALUE_INTERVAL: "30"
+  AVALANCHE_SERIES_INTERVAL: "60"
+
+services:
+  scrape-target-1:
+    <<: *avalanche-image
+    command: ["--role=scrape-target"]
+    environment: *avalanche-env
+    ports: ["9001:9001"]
+
+  scrape-target-2:
+    <<: *avalanche-image
+    command: ["--role=scrape-target"]
+    environment: *avalanche-env
+    ports: ["9002:9001"]
+
+  scrape-target-3:
+    <<: *avalanche-image
+    command: ["--role=scrape-target"]
+    environment: *avalanche-env
+    ports: ["9003:9001"]
+
+  remote-writer-1:
+    <<: *avalanche-image
+    command: ["--role=remote-writer"]
+    environment:
+      <<: *avalanche-env
+      AVALANCHE_REMOTE_URL: "http://prometheus:9090"
+      # Default --remote-requests-count=100 makes remote-write a bounded
+      # one-off run, after which avalanche exits entirely (the whole process,
+      # not just the writer -- see cmd/avalanche/avalanche.go's run.Group).
+      # -1 keeps it (and the container) running indefinitely.
+      AVALANCHE_REMOTE_REQUESTS_COUNT: "-1"
+      # avalanche's writer intentionally sends some out-of-order timestamps
+      # by default (to load-test OOO handling); this target Prometheus has
+      # no --storage.tsdb.out-of-order-time-window, so it rejects those with
+      # HTTP 400 and avalanche gives up entirely after enough of them. Off
+      # for a clean baseline demo -- flip back to "true" (and configure
+      # Prometheus's OOO window) if you want to exercise that path instead.
+      AVALANCHE_REMOTE_OUT_OF_ORDER: "false"
+      # Both writers share the same config, so without a distinguishing
+      # label they'd generate identical series and push conflicting values
+      # for the same timestamp -- Prometheus's remote-write receiver rejects
+      # that as a duplicate sample (HTTP 400). const-label makes their
+      # series distinct, like giving each replica its own instance label.
+      AVALANCHE_CONST_LABEL: "writer=1"
+    depends_on:
+      - prometheus
+
+  remote-writer-2:
+    <<: *avalanche-image
+    command: ["--role=remote-writer"]
+    environment:
+      <<: *avalanche-env
+      AVALANCHE_REMOTE_URL: "http://prometheus:9090"
+      AVALANCHE_REMOTE_REQUESTS_COUNT: "-1"
+      AVALANCHE_REMOTE_OUT_OF_ORDER: "false"
+      AVALANCHE_CONST_LABEL: "writer=2"
+    depends_on:
+      - prometheus
+
+  ruler:
+    <<: *avalanche-image
+    command: ["--role=ruler"]
+    environment:
+      <<: *avalanche-env
+      AVALANCHE_RECORDING_RULE_COUNT: "20"
+      AVALANCHE_ALERTING_RULE_COUNT: "10"
+    ports: ["9004:9001"]
+
+  # One-shot: fetches the ruler's generated rules.yml into a shared volume
+  # before Prometheus starts, so `rule_files:` finds it on first load.
+  rules-fetcher:
+    image: curlimages/curl:8.11.1
+    # Named volumes are created root:root/0755 by default; curlimages/curl
+    # runs as a non-root user that can't write into /rules otherwise (the
+    # loop below would then retry forever, and prometheus would never start).
+    user: "0:0"
+    depends_on:
+      - ruler
+    volumes:
+      - rules-data:/rules
+    entrypoint: ["sh", "-c"]
+    command:
+      - until curl -sf http://ruler:9001/rules -o /rules/rules.yml; do sleep 1; done
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - rules-data:/etc/prometheus/rules:ro
+    ports: ["9090:9090"]
+    depends_on:
+      rules-fetcher:
+        condition: service_completed_successfully
+
+volumes:
+  rules-data:

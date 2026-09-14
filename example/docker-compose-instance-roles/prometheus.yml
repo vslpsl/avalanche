@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Populated once at startup by the rules-fetcher service, from the ruler
+# avalanche instance's /rules endpoint (see docker-compose.yml). The rule set
+# is a static snapshot built by avalanche at its own startup, so a one-shot
+# fetch before Prometheus starts is enough -- no reload loop needed.
+rule_files:
+  - /etc/prometheus/rules/rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: avalanche-scrape-target
+    # Exposing ~100,000 series as text is slower than a typical target's
+    # /metrics -- give it more headroom than the default 10s scrape_timeout.
+    scrape_interval: 30s
+    scrape_timeout: 25s
+    static_configs:
+      - targets:
+          - scrape-target-1:9001
+          - scrape-target-2:9001
+          - scrape-target-3:9001
