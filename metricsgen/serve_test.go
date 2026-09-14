@@ -16,6 +16,7 @@ package metricsgen
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"strconv"
 	"testing"
 	"time"
@@ -97,6 +98,9 @@ func TestRunMetrics(t *testing.T) {
 		MetricLength:   1,
 		LabelLength:    1,
 		ConstLabels:    []string{"constLabel=test"},
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -139,6 +143,9 @@ func TestRunMetrics_ValueChange_SeriesCountSame(t *testing.T) {
 		ConstLabels:    []string{"constLabel=test"},
 
 		ValueInterval: 1, // Change value every second.
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -215,6 +222,9 @@ func TestRunMetrics_SeriesChurn(t *testing.T) {
 		SeriesInterval: 1, // Churn series every second.
 		// Change value every second too, there was a regression when both value and series cycle.
 		ValueInterval: 1,
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -263,6 +273,9 @@ func TestRunMetricsSeriesCountChangeDoubleHalve(t *testing.T) {
 		SeriesChangeInterval: 3,
 		SeriesOperationMode:  doubleHalveOpMode,
 		ConstLabels:          []string{"constLabel=test"},
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -307,6 +320,9 @@ func TestRunMetricsGradualChange(t *testing.T) {
 		SeriesChangeInterval: 3,
 		SeriesOperationMode:  gradualChangeOpMode,
 		ConstLabels:          []string{"constLabel=test"},
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -388,6 +404,9 @@ func TestRunMetricsSpikeChange(t *testing.T) {
 		SeriesChangeInterval: 10,
 		SeriesOperationMode:  spikeOpMode,
 		ConstLabels:          []string{"constLabel=test"},
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -415,6 +434,295 @@ func TestRunMetricsSpikeChange(t *testing.T) {
 	}
 }
 
+// churnedCount returns the number of distinct series slots (deduplicated by
+// series_id across metric families) whose churn_generation label is present
+// and non-zero.
+func churnedCount(t *testing.T, registry *prometheus.Registry) int {
+	t.Helper()
+
+	metricsFamilies, err := registry.Gather()
+	assert.NoError(t, err)
+
+	seen := make(map[string]bool)
+	churned := 0
+	for _, mf := range metricsFamilies {
+		for _, m := range mf.Metric {
+			var seriesID, churnGen string
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "series_id":
+					seriesID = l.GetValue()
+				case "churn_generation":
+					churnGen = l.GetValue()
+				}
+			}
+			if seriesID == "" || seen[seriesID] {
+				continue
+			}
+			seen[seriesID] = true
+			if churnGen != "" && churnGen != "0" {
+				churned++
+			}
+		}
+	}
+	return churned
+}
+
+func TestSeriesLabels_ChurnGenerationAbsentWhenNil(t *testing.T) {
+	labels := seriesLabels(0, 0, nil, nil, nil)
+	assert.NotContains(t, labels, "churn_generation")
+}
+
+func TestSeriesLabels_ChurnGenerationPresentWhenSet(t *testing.T) {
+	labels := seriesLabels(1, 0, nil, nil, []int32{0, 5, 0})
+	assert.Equal(t, "5", labels["churn_generation"])
+}
+
+func TestShuffledPool_IsPermutation(t *testing.T) {
+	pool := shuffledPool(1000, rand.New(rand.NewSource(1)))
+	require.Len(t, pool, 1000)
+
+	seen := make(map[int32]bool, 1000)
+	for _, v := range pool {
+		assert.False(t, seen[v], "value %d appeared more than once in the pool", v)
+		seen[v] = true
+	}
+	assert.Len(t, seen, 1000)
+}
+
+func TestCumulativeChurnTarget_EvenSteps(t *testing.T) {
+	assert.Equal(t, 50, cumulativeChurnTarget(200, 1, 4))
+	assert.Equal(t, 100, cumulativeChurnTarget(200, 2, 4))
+	assert.Equal(t, 150, cumulativeChurnTarget(200, 3, 4))
+	assert.Equal(t, 200, cumulativeChurnTarget(200, 4, 4))
+}
+
+func TestCumulativeChurnTarget_RoundingReachesExactTargetAtWindowEnd(t *testing.T) {
+	assert.Equal(t, 170, cumulativeChurnTarget(170, 6, 6))
+}
+
+func TestPartialSeriesChurnValidation(t *testing.T) {
+	base := Config{
+		SeriesOperationMode:        disabledOpMode,
+		MaxSeriesCount:             10,
+		MinSeriesCount:             0,
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnPercent:  0,
+		PartialSeriesChurnStep:     30,
+	}
+	assert.NoError(t, base.Validate(), "defaults must be valid on their own")
+
+	percentTooHigh := base
+	percentTooHigh.PartialSeriesChurnPercent = 150
+	assert.Error(t, percentTooHigh.Validate())
+
+	percentNegative := base
+	percentNegative.PartialSeriesChurnPercent = -1
+	assert.Error(t, percentNegative.Validate())
+
+	zeroInterval := base
+	zeroInterval.PartialSeriesChurnInterval = 0
+	assert.Error(t, zeroInterval.Validate())
+
+	zeroStep := base
+	zeroStep.PartialSeriesChurnStep = 0
+	assert.Error(t, zeroStep.Validate())
+
+	notDivisible := base
+	notDivisible.PartialSeriesChurnInterval = 1000
+	notDivisible.PartialSeriesChurnStep = 300
+	assert.Error(t, notDivisible.Validate())
+
+	stepBiggerThanInterval := base
+	stepBiggerThanInterval.PartialSeriesChurnInterval = 30
+	stepBiggerThanInterval.PartialSeriesChurnStep = 60
+	assert.Error(t, stepBiggerThanInterval.Validate())
+
+	withOpMode := base
+	withOpMode.PartialSeriesChurnPercent = 20
+	withOpMode.SeriesOperationMode = gradualChangeOpMode
+	withOpMode.SeriesChangeRate = 1
+	assert.Error(t, withOpMode.Validate(), "partial series churn must reject --series-operation-mode combos")
+}
+
+func TestRunMetrics_PartialSeriesChurn_DisabledByDefault(t *testing.T) {
+	testCfg := Config{
+		GaugeMetricCount:    50,
+		LabelCount:          1,
+		SeriesCount:         20,
+		MetricLength:        1,
+		LabelLength:         1,
+		MaxSeriesCount:      100,
+		MinSeriesCount:      0,
+		SeriesOperationMode: disabledOpMode,
+
+		// PartialSeriesChurnPercent left at its zero value (0) = disabled.
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
+	}
+	assert.NoError(t, testCfg.Validate())
+
+	reg := prometheus.NewRegistry()
+	coll := NewCollector(testCfg)
+	reg.MustRegister(coll)
+
+	go coll.Run()
+	t.Cleanup(func() {
+		coll.Stop(nil)
+	})
+
+	time.Sleep(1 * time.Second)
+
+	metricsFamilies, err := reg.Gather()
+	require.NoError(t, err)
+	require.NotEmpty(t, metricsFamilies)
+	for _, mf := range metricsFamilies {
+		for _, m := range mf.Metric {
+			for _, l := range m.GetLabel() {
+				assert.NotEqual(t, "churn_generation", l.GetName(), "churn_generation must not appear when --partial-series-churn-percent=0")
+			}
+		}
+	}
+}
+
+func TestRunMetrics_PartialSeriesChurn_CumulativeTargets(t *testing.T) {
+	testCfg := Config{
+		GaugeMetricCount:    1,
+		LabelCount:          1,
+		SeriesCount:         100,
+		MetricLength:        1,
+		LabelLength:         1,
+		MaxSeriesCount:      1000,
+		MinSeriesCount:      0,
+		SeriesOperationMode: disabledOpMode,
+
+		PartialSeriesChurnPercent:  50, // windowTargetCount = 50
+		PartialSeriesChurnInterval: 8,
+		PartialSeriesChurnStep:     2, // steps = 4
+	}
+	assert.NoError(t, testCfg.Validate())
+
+	reg := prometheus.NewRegistry()
+	coll := NewCollector(testCfg)
+	reg.MustRegister(coll)
+
+	go coll.Run()
+	t.Cleanup(func() {
+		coll.Stop(nil)
+	})
+
+	// Poll continuously through the whole window (plus a small buffer past its
+	// end) instead of sleeping to fixed checkpoints, so the assertions are
+	// robust to goroutine/ticker scheduling jitter: the churned count must
+	// never exceed the window target and must never decrease, and must reach
+	// exactly the target by the end of the window.
+	deadline := time.Now().Add(9 * time.Second)
+	prev := -1
+	for time.Now().Before(deadline) {
+		cur := churnedCount(t, reg)
+		assert.LessOrEqual(t, cur, 50, "churned count must never exceed the window target")
+		assert.GreaterOrEqual(t, cur, prev, "churned count must never decrease within a window")
+		prev = cur
+		time.Sleep(200 * time.Millisecond)
+	}
+	assert.Equal(t, 50, churnedCount(t, reg), "expected the full window target to be churned by the end of the window")
+}
+
+func TestRunMetrics_PartialSeriesChurn_LabelPresentWithOtherLabels(t *testing.T) {
+	testCfg := Config{
+		GaugeMetricCount:    1,
+		LabelCount:          2,
+		SeriesCount:         20,
+		MetricLength:        1,
+		LabelLength:         1,
+		MaxSeriesCount:      100,
+		MinSeriesCount:      0,
+		SeriesOperationMode: disabledOpMode,
+		ConstLabels:         []string{"constLabel=test"},
+
+		PartialSeriesChurnPercent:  100,
+		PartialSeriesChurnInterval: 1,
+		PartialSeriesChurnStep:     1,
+	}
+	assert.NoError(t, testCfg.Validate())
+
+	reg := prometheus.NewRegistry()
+	coll := NewCollector(testCfg)
+	reg.MustRegister(coll)
+
+	go coll.Run()
+	t.Cleanup(func() {
+		coll.Stop(nil)
+	})
+
+	time.Sleep(2 * time.Second)
+
+	metricsFamilies, err := reg.Gather()
+	require.NoError(t, err)
+	require.NotEmpty(t, metricsFamilies)
+	for _, mf := range metricsFamilies {
+		for _, m := range mf.Metric {
+			labelMap := make(map[string]string)
+			for _, l := range m.GetLabel() {
+				labelMap[l.GetName()] = l.GetValue()
+			}
+			assert.Equal(t, "test", labelMap["constLabel"])
+			assert.Contains(t, labelMap, "label_key_k_0")
+			assert.Contains(t, labelMap, "series_id")
+			assert.Contains(t, labelMap, "cycle_id")
+			assert.Contains(t, labelMap, "churn_generation")
+			assert.NotEqual(t, "0", labelMap["churn_generation"])
+		}
+	}
+}
+
+func TestRunMetrics_SeriesIntervalAndPartialChurn_Independent(t *testing.T) {
+	testCfg := Config{
+		GaugeMetricCount:    1,
+		LabelCount:          1,
+		SeriesCount:         100,
+		MetricLength:        1,
+		LabelLength:         1,
+		MaxSeriesCount:      1000,
+		MinSeriesCount:      0,
+		SeriesOperationMode: disabledOpMode,
+
+		SeriesInterval: 1, // Full cycle_id churn every second, independent of the mechanism below.
+
+		PartialSeriesChurnPercent:  50,
+		PartialSeriesChurnInterval: 8,
+		PartialSeriesChurnStep:     2,
+	}
+	assert.NoError(t, testCfg.Validate())
+
+	reg := prometheus.NewRegistry()
+	coll := NewCollector(testCfg)
+	reg.MustRegister(coll)
+
+	go coll.Run()
+	t.Cleanup(func() {
+		coll.Stop(nil)
+	})
+
+	cycleID := -1
+	prevChurned := -1
+	deadline := time.Now().Add(9 * time.Second)
+	for time.Now().Before(deadline) {
+		gotCycleID := currentCycleID(t, reg)
+		assert.GreaterOrEqual(t, gotCycleID, cycleID, "cycle_id must never go backwards")
+		cycleID = gotCycleID
+
+		churned := churnedCount(t, reg)
+		assert.LessOrEqual(t, churned, 50, "churned count must never exceed the window target")
+		assert.GreaterOrEqual(t, churned, prevChurned, "churned count must never decrease within a window")
+		prevChurned = churned
+
+		time.Sleep(300 * time.Millisecond)
+	}
+	require.Greater(t, cycleID, 0, "cycle_id should have advanced at least once via --series-interval")
+	assert.Equal(t, 50, churnedCount(t, reg), "partial series churn should reach its window target independently of --series-interval")
+}
+
 func TestCollectorLabels(t *testing.T) {
 	testCfg := Config{
 		GaugeMetricCount:    1,
@@ -427,6 +735,9 @@ func TestCollectorLabels(t *testing.T) {
 		LabelLength:         1,
 		SeriesOperationMode: spikeOpMode,
 		ConstLabels:         []string{"constLabel=test"},
+
+		PartialSeriesChurnInterval: 7200,
+		PartialSeriesChurnStep:     30,
 	}
 
 	assert.NoError(t, testCfg.Validate())

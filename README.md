@@ -9,6 +9,13 @@ This allows load testing services that can scrape (e.g. Prometheus, OpenTelemetr
 
 Metric names and unique series change over time to simulate series churn.
 
+In addition to the full series churn driven by `--series-interval`, a
+separate, independent mechanism lets you simulate gradual, partial churn of
+a fraction of series over a longer window (e.g. matching a Prometheus TSDB
+block duration) — see `--partial-series-churn-interval` (default `7200`s),
+`--partial-series-churn-percent` (default `0`, disabled) and
+`--partial-series-churn-step` (default `30`s) in `--help`.
+
 Checkout the (old-ish) [blog post](https://blog.freshtracks.io/load-testing-prometheus-metric-ingestion-5b878711711c).
 
 ## Installing
