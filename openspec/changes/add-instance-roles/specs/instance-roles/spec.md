@@ -14,7 +14,7 @@ ruler) поверх существующих url/path-триггеров под�
 `--role-ruler`, каждый по умолчанию `true`. Подсистема ДОЛЖНА (SHALL)
 фактически работать только если её роль включена **и** её собственный
 триггер-флаг задан (`--remote-url` для remote-writer, `--query-url` для
-querier, `--rules-output-path` для ruler; scrape-target триггерится
+querier, `--rules-endpoint-path` для ruler; scrape-target триггерится
 самим фактом запуска HTTP-сервера).
 
 #### Scenario: Роли по умолчанию не меняют текущее поведение

@@ -69,8 +69,17 @@ You can choose you own distribution, but usually it makes more sense to mimic re
 
 On top of scrape target functionality, avalanche is capable of Remote Write client load simulation, following the same, configured metric distribution via `--remote*` flags.
 
+Series values are generated using a random source seeded from the current time by default; pass `--seed` (non-zero) to make the sequence of generated values reproducible between runs with an identical config.
+
+avalanche can also generate Prometheus recording and alerting rules matching its own metric configuration, served over HTTP (see `/rules` below) — see `--recording-rule-count`, `--alerting-rule-count`, `--rule-group-size` and `--rule-eval-interval` in `--help`. The rule set is built once at startup and cached — it does not track subsequent series churn or `--metric-interval` renames. Alerting thresholds are simple heuristics over the `[0,99)` range every metric type is generated with (see `--help`) — treat them as a starting point to tune for your own scenario, not a guarantee of a "meaningful" alert (for example, with the default histogram bucket layout, the generated histogram alert is expected to fire close to continuously).
+
 ### Endpoints
 
-Two endpoints are available :
+Three endpoints are available :
 * `/metrics` - metrics endpoint
 * `/health` - healthcheck endpoint
+* `/rules` - generated Prometheus rule groups (recording + alerting), as YAML; enabled by default, disable with `--rules-endpoint-path=""`. Example:
+  ```bash
+  curl http://localhost:9001/rules > rules.yml
+  # then add rules.yml to rule_files: in your target Prometheus and reload it.
+  ```

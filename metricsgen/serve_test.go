@@ -101,6 +101,8 @@ func TestRunMetrics(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -146,6 +148,8 @@ func TestRunMetrics_ValueChange_SeriesCountSame(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -225,6 +229,8 @@ func TestRunMetrics_SeriesChurn(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -276,6 +282,8 @@ func TestRunMetricsSeriesCountChangeDoubleHalve(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -323,6 +331,8 @@ func TestRunMetricsGradualChange(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -407,6 +417,8 @@ func TestRunMetricsSpikeChange(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -509,6 +521,8 @@ func TestPartialSeriesChurnValidation(t *testing.T) {
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnPercent:  0,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, base.Validate(), "defaults must be valid on their own")
 
@@ -559,6 +573,8 @@ func TestRunMetrics_PartialSeriesChurn_DisabledByDefault(t *testing.T) {
 		// PartialSeriesChurnPercent left at its zero value (0) = disabled.
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -599,6 +615,8 @@ func TestRunMetrics_PartialSeriesChurn_CumulativeTargets(t *testing.T) {
 		PartialSeriesChurnPercent:  50, // windowTargetCount = 50
 		PartialSeriesChurnInterval: 8,
 		PartialSeriesChurnStep:     2, // steps = 4
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -643,6 +661,8 @@ func TestRunMetrics_PartialSeriesChurn_LabelPresentWithOtherLabels(t *testing.T)
 		PartialSeriesChurnPercent:  100,
 		PartialSeriesChurnInterval: 1,
 		PartialSeriesChurnStep:     1,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -692,6 +712,8 @@ func TestRunMetrics_SeriesIntervalAndPartialChurn_Independent(t *testing.T) {
 		PartialSeriesChurnPercent:  50,
 		PartialSeriesChurnInterval: 8,
 		PartialSeriesChurnStep:     2,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 	assert.NoError(t, testCfg.Validate())
 
@@ -723,6 +745,76 @@ func TestRunMetrics_SeriesIntervalAndPartialChurn_Independent(t *testing.T) {
 	assert.Equal(t, 50, churnedCount(t, reg), "partial series churn should reach its window target independently of --series-interval")
 }
 
+// gatherGaugeValuesBySeriesID returns the current gauge values keyed by
+// their series_id label, for comparing value sequences across collectors.
+func gatherGaugeValuesBySeriesID(t *testing.T, registry *prometheus.Registry) map[string]float64 {
+	t.Helper()
+
+	metricsFamilies, err := registry.Gather()
+	assert.NoError(t, err)
+
+	values := make(map[string]float64)
+	for _, mf := range metricsFamilies {
+		if mf.GetType() != io_prometheus_client.MetricType_GAUGE {
+			continue
+		}
+		for _, m := range mf.Metric {
+			var seriesID string
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "series_id" {
+					seriesID = l.GetValue()
+				}
+			}
+			values[seriesID] = m.GetGauge().GetValue()
+		}
+	}
+	return values
+}
+
+func TestNewCollector_SeedDeterminism(t *testing.T) {
+	newCfg := func() Config {
+		return Config{
+			GaugeMetricCount:    1,
+			LabelCount:          1,
+			SeriesCount:         5,
+			MetricLength:        1,
+			LabelLength:         1,
+			MaxSeriesCount:      10,
+			MinSeriesCount:      0,
+			SeriesOperationMode: disabledOpMode,
+
+			PartialSeriesChurnInterval: 7200,
+			PartialSeriesChurnStep:     30,
+			RuleGroupSize:              10,
+			RuleEvalInterval:           60,
+
+			Seed: 42,
+		}
+	}
+
+	run := func() map[string]float64 {
+		cfg := newCfg()
+		require.NoError(t, cfg.Validate())
+
+		reg := prometheus.NewRegistry()
+		coll := NewCollector(cfg)
+		reg.MustRegister(coll)
+
+		go coll.Run()
+		t.Cleanup(func() {
+			coll.Stop(nil)
+		})
+
+		time.Sleep(300 * time.Millisecond)
+		return gatherGaugeValuesBySeriesID(t, reg)
+	}
+
+	first := run()
+	second := run()
+	require.NotEmpty(t, first)
+	assert.Equal(t, first, second, "two collectors with the same non-zero --seed must produce identical value sequences")
+}
+
 func TestCollectorLabels(t *testing.T) {
 	testCfg := Config{
 		GaugeMetricCount:    1,
@@ -738,6 +830,8 @@ func TestCollectorLabels(t *testing.T) {
 
 		PartialSeriesChurnInterval: 7200,
 		PartialSeriesChurnStep:     30,
+		RuleGroupSize:              10,
+		RuleEvalInterval:           60,
 	}
 
 	assert.NoError(t, testCfg.Validate())

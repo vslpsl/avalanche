@@ -50,9 +50,13 @@ type Collector struct {
 // NewCollector returns Prometheus collector that can be registered in registry
 // that handles metric creation and changes, based on the given configuration.
 func NewCollector(cfg Config) *Collector {
+	seedSource := rand.NewSource(time.Now().UnixNano())
+	if cfg.Seed != 0 {
+		seedSource = rand.NewSource(cfg.Seed)
+	}
 	c := &Collector{
 		cfg:            cfg,
-		valGen:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		valGen:         rand.New(seedSource),
 		updateNotifyCh: make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
 	}
@@ -91,6 +95,12 @@ type Config struct {
 	ValueInterval, SeriesInterval, MetricInterval, SeriesChangeInterval, SeriesChangeRate int
 
 	PartialSeriesChurnInterval, PartialSeriesChurnPercent, PartialSeriesChurnStep int
+
+	Seed int64
+
+	RulesEndpointPath                     string
+	RecordingRuleCount, AlertingRuleCount int
+	RuleGroupSize, RuleEvalInterval       int
 
 	SpikeMultiplier     float64
 	SeriesOperationMode opMode
@@ -151,6 +161,20 @@ func NewConfigFromFlags(flagReg func(name, help string) *kingpin.FlagClause) *Co
 	flagReg("partial-series-churn-step", "Step (seconds) at which partial series churn is applied within the window.").Default("30").
 		IntVar(&cfg.PartialSeriesChurnStep)
 
+	flagReg("seed", "Seed for the value generator. 0 means a time-based seed is used (values are not reproducible between runs).").Default("0").
+		Int64Var(&cfg.Seed)
+
+	flagReg("rules-endpoint-path", "HTTP path to serve generated Prometheus rule groups (recording + alerting) on, built once at startup from the current metric generation config. Empty string disables the endpoint.").Default("/rules").
+		StringVar(&cfg.RulesEndpointPath)
+	flagReg("recording-rule-count", "Number of recording rules to generate, referencing generated metrics. 0 means none.").Default("0").
+		IntVar(&cfg.RecordingRuleCount)
+	flagReg("alerting-rule-count", "Number of alerting rules to generate, referencing generated metrics/recording rules. 0 means none.").Default("0").
+		IntVar(&cfg.AlertingRuleCount)
+	flagReg("rule-group-size", "Maximum number of rules per generated rule group.").Default("10").
+		IntVar(&cfg.RuleGroupSize)
+	flagReg("rule-eval-interval", "Evaluation interval (seconds) for generated rule groups.").Default("60").
+		IntVar(&cfg.RuleEvalInterval)
+
 	flagReg("series-operation-mode", "Mode of operation, so optional advanced behaviours on top of --value-interval, --series-interval and --metric-interval.").Default(disabledOpMode).
 		EnumVar(&cfg.SeriesOperationMode, disabledOpMode, gradualChangeOpMode, doubleHalveOpMode, spikeOpMode)
 	return cfg
@@ -208,6 +232,22 @@ func (c Config) Validate() error {
 	if c.PartialSeriesChurnPercent > 0 && c.SeriesOperationMode != disabledOpMode {
 		return fmt.Errorf("--partial-series-churn-percent is not supported together with --series-operation-mode=%s (only %q is supported), as the runtime-varying series count could exceed the size allocated for churn_generation tracking", c.SeriesOperationMode, disabledOpMode)
 	}
+
+	if c.RecordingRuleCount < 0 {
+		return fmt.Errorf("--recording-rule-count must be 0 or higher, got %d", c.RecordingRuleCount)
+	}
+	if c.AlertingRuleCount < 0 {
+		return fmt.Errorf("--alerting-rule-count must be 0 or higher, got %d", c.AlertingRuleCount)
+	}
+	if c.RuleGroupSize <= 0 {
+		return fmt.Errorf("--rule-group-size must be greater than 0, got %d", c.RuleGroupSize)
+	}
+	if c.RuleEvalInterval <= 0 {
+		return fmt.Errorf("--rule-eval-interval must be greater than 0, got %d", c.RuleEvalInterval)
+	}
+	if c.RulesEndpointPath == "/metrics" || c.RulesEndpointPath == "/health" {
+		return fmt.Errorf("--rules-endpoint-path must not be %q (already used by avalanche); use \"\" to disable the rules endpoint", c.RulesEndpointPath)
+	}
 	return nil
 }
 
@@ -252,12 +292,55 @@ func (c *Collector) seriesLabelNames() []string {
 	return names
 }
 
+// The metricCycle argument to the functions below is s.metricCycle when
+// called from recreateMetrics (the live, possibly-churned value) or 0 when
+// called from the rule generator (the value at startup, before any
+// --metric-interval tick could have fired) — same format, single source of
+// truth so the two never drift apart.
+
+func gaugeMetricName(cfg Config, metricCycle, id int) string {
+	return fmt.Sprintf("avalanche_gauge_metric_%s_%v_%v", strings.Repeat("m", cfg.MetricLength), metricCycle, id)
+}
+
+func counterMetricName(cfg Config, metricCycle, id int) string {
+	return fmt.Sprintf("avalanche_counter_metric_%s_%v_%v_total", strings.Repeat("m", cfg.MetricLength), metricCycle, id)
+}
+
+func histogramMetricName(cfg Config, metricCycle, id int) string {
+	return fmt.Sprintf("avalanche_histogram_metric_%s_%v_%v", strings.Repeat("m", cfg.MetricLength), metricCycle, id)
+}
+
+func nativeHistogramMetricName(cfg Config, metricCycle, id int) string {
+	return fmt.Sprintf("avalanche_native_histogram_metric_%s_%v_%v", strings.Repeat("m", cfg.MetricLength), metricCycle, id)
+}
+
+func summaryMetricName(cfg Config, metricCycle, id int) string {
+	return fmt.Sprintf("avalanche_summary_metric_%s_%v_%v", strings.Repeat("m", cfg.MetricLength), metricCycle, id)
+}
+
+// buildLabelKeys returns the deterministic list of label keys (own
+// label_key_... keys plus const-label names) this Config produces —
+// independent of any live Collector state, reused by both Run() (which also
+// needs the corresponding values) and the rule generator (which only needs
+// the keys).
+func buildLabelKeys(cfg Config) []string {
+	keys := make([]string, cfg.LabelCount)
+	for idx := 0; idx < cfg.LabelCount; idx++ {
+		keys[idx] = fmt.Sprintf("label_key_%s_%v", strings.Repeat("k", cfg.LabelLength), idx)
+	}
+	for _, cLabel := range cfg.ConstLabels {
+		split := strings.Split(cLabel, "=")
+		keys = append(keys, split[0])
+	}
+	return keys
+}
+
 func (c *Collector) recreateMetrics(unsafeGetState readOnlyStateFn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := unsafeGetState()
 	for id := range c.gauges {
-		mName := fmt.Sprintf("avalanche_gauge_metric_%s_%v_%v", strings.Repeat("m", c.cfg.MetricLength), s.metricCycle, id)
+		mName := gaugeMetricName(c.cfg, s.metricCycle, id)
 		gauge := prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{Name: mName, Help: help(mName)},
 			append(c.seriesLabelNames(), c.labelKeys...),
@@ -265,7 +348,7 @@ func (c *Collector) recreateMetrics(unsafeGetState readOnlyStateFn) {
 		c.gauges[id] = gauge
 	}
 	for id := range c.counters {
-		mName := fmt.Sprintf("avalanche_counter_metric_%s_%v_%v_total", strings.Repeat("m", c.cfg.MetricLength), s.metricCycle, id)
+		mName := counterMetricName(c.cfg, s.metricCycle, id)
 		counter := prometheus.NewCounterVec(
 			prometheus.CounterOpts{Name: mName, Help: help(mName)},
 			append(c.seriesLabelNames(), c.labelKeys...),
@@ -278,7 +361,7 @@ func (c *Collector) recreateMetrics(unsafeGetState readOnlyStateFn) {
 		bkts[i] = 0.0001 * math.Pow10(i)
 	}
 	for id := range c.histograms {
-		mName := fmt.Sprintf("avalanche_histogram_metric_%s_%v_%v", strings.Repeat("m", c.cfg.MetricLength), s.metricCycle, id)
+		mName := histogramMetricName(c.cfg, s.metricCycle, id)
 		histogram := prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{Name: mName, Help: help(mName), Buckets: bkts},
 			append(c.seriesLabelNames(), c.labelKeys...),
@@ -287,7 +370,7 @@ func (c *Collector) recreateMetrics(unsafeGetState readOnlyStateFn) {
 	}
 
 	for id := range c.nativeHistograms {
-		mName := fmt.Sprintf("avalanche_native_histogram_metric_%s_%v_%v", strings.Repeat("m", c.cfg.MetricLength), s.metricCycle, id)
+		mName := nativeHistogramMetricName(c.cfg, s.metricCycle, id)
 		histogram := prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{Name: mName, Help: help(mName), NativeHistogramBucketFactor: 1.1},
 			append(c.seriesLabelNames(), c.labelKeys...),
@@ -308,7 +391,7 @@ func (c *Collector) recreateMetrics(unsafeGetState readOnlyStateFn) {
 		}
 	}
 	for id := range c.summaries {
-		mName := fmt.Sprintf("avalanche_summary_metric_%s_%v_%v", strings.Repeat("m", c.cfg.MetricLength), s.metricCycle, id)
+		mName := summaryMetricName(c.cfg, s.metricCycle, id)
 		summary := prometheus.NewSummaryVec(
 			prometheus.SummaryOpts{Name: mName, Help: help(mName), Objectives: objectives},
 			append(c.seriesLabelNames(), c.labelKeys...),
@@ -658,17 +741,13 @@ type readOnlyStateFn func() metricState
 // Run creates a set of Prometheus test series that update over time.
 // NOTE: Only one execution of RunMetrics is currently expected.
 func (c *Collector) Run() error {
-	labelKeys := make([]string, c.cfg.LabelCount)
-	for idx := 0; idx < c.cfg.LabelCount; idx++ {
-		labelKeys[idx] = fmt.Sprintf("label_key_%s_%v", strings.Repeat("k", c.cfg.LabelLength), idx)
-	}
+	labelKeys := buildLabelKeys(c.cfg)
 	labelValues := make([]string, c.cfg.LabelCount)
 	for idx := 0; idx < c.cfg.LabelCount; idx++ {
 		labelValues[idx] = fmt.Sprintf("label_val_%s_%v", strings.Repeat("v", c.cfg.LabelLength), idx)
 	}
 	for _, cLabel := range c.cfg.ConstLabels {
 		split := strings.Split(cLabel, "=")
-		labelKeys = append(labelKeys, split[0])
 		labelValues = append(labelValues, split[1])
 	}
 

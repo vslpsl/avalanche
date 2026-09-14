@@ -72,6 +72,15 @@ func main() {
 		kingpin.FatalUsage("remote write config validation failed: %v", err)
 	}
 
+	var rulesYAML []byte
+	if cfg.RulesEndpointPath != "" {
+		var err error
+		rulesYAML, err = metricsgen.GenerateRules(*cfg)
+		if err != nil {
+			log.Fatalf("generating rules: %v", err)
+		}
+	}
+
 	collector := metricsgen.NewCollector(*cfg)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collector)
@@ -101,6 +110,13 @@ func main() {
 			EnableOpenMetrics: true,
 		}))
 		http.HandleFunc("/health", health.New(health.Health{}).Handler)
+		if cfg.RulesEndpointPath != "" {
+			fmt.Printf("Serving generated Prometheus rules at :%v%v\n", *port, cfg.RulesEndpointPath)
+			http.HandleFunc(cfg.RulesEndpointPath, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/yaml")
+				_, _ = w.Write(rulesYAML)
+			})
+		}
 		return httpSrv.ListenAndServe()
 	}, func(_ error) {
 		_ = httpSrv.Shutdown(context.Background())

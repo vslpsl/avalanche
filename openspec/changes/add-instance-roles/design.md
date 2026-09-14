@@ -64,7 +64,7 @@ if *roleScrapeTarget {
 // /health регистрируется всегда, независимо от ролей
 if *roleRemoteWriter && writeCfg.URL != nil { ... как сейчас ... }
 if *roleQuerier && queryCfg.URL != nil { ... add-query-load ... }
-if *roleRuler && rulesCfg.OutputPath != "" { ... add-rule-generation ... }
+if *roleRuler && rulesCfg.EndpointPath != "" { ... add-rule-generation ... }
 ```
 - *Рассмотренная альтернатива*: всегда создавать `Collector`, но не
   запускать его горутину. Отклонено — сам `NewCollector`/`recreateMetrics`

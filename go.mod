@@ -12,6 +12,7 @@ require (
 	github.com/prometheus/common v0.69.0
 	github.com/prometheus/prometheus v0.313.0
 	github.com/stretchr/testify v1.12.1
+	go.yaml.in/yaml/v3 v3.0.5
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 )
 
@@ -26,7 +27,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nelkinda/http-go v0.0.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

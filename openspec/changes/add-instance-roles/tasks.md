@@ -16,7 +16,7 @@
 - [ ] 1.4 Гейтить запуск remote-write (`roleRemoteWriter &&
       writeCfg.URL != nil`), querier из `add-query-load`
       (`roleQuerier && queryCfg.URL != ""`), ruler из
-      `add-rule-generation` (`roleRuler && rulesCfg.OutputPath != ""`);
+      `add-rule-generation` (`roleRuler && rulesCfg.EndpointPath != ""`);
       проверить unit-тестами все 4 комбинации роль=true/false ×
       триггер-флаг задан/не задан для одной из подсистем (например,
       remote-writer).
