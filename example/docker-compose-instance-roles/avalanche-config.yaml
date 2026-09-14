@@ -1,0 +1,14 @@
+# Shared config-file (see README.md #config-file), mounted read-only into
+# every avalanche instance in docker-compose.yml at the same path and passed
+# via --config-file. Values here are the LOWEST-priority source (CLI flag >
+# env var > this file > built-in default) -- per-instance bits that must
+# differ (--role, AVALANCHE_REMOTE_URL, AVALANCHE_CONST_LABEL, ...) stay as
+# env vars/command flags on each service instead, and override this file.
+gauge-metric-count: 500
+counter-metric-count: 500
+series-count: 100
+label-count: 10
+value-interval: 30
+series-interval: 60
+recording-rule-count: 20
+alerting-rule-count: 10

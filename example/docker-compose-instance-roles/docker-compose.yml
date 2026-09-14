@@ -1,14 +1,17 @@
 # Demonstrates the --role instance-role split (see README.md #instance-roles)
-# against a real target Prometheus:
+# and --config-file (see README.md #config-file) against a real target
+# Prometheus:
 #   - 3x scrape-target : Prometheus scrapes their /metrics.
 #   - 2x remote-writer  : push samples to Prometheus via remote_write.
 #   - 1x ruler          : generates recording/alerting rules, served on /rules;
 #                         fetched once at startup into Prometheus's rule_files.
 #
-# All avalanche instances share the exact same metric-generation config
-# (~100,000 series: 500 gauges + 500 counters, 100 series each) via the
-# AVALANCHE_* environment anchor below -- only --role (and, for the
-# remote-writers, AVALANCHE_REMOTE_URL) differs per instance. There is no
+# All six avalanche instances share the exact same metric-generation config
+# (~100,000 series: 500 gauges + 500 counters, 100 series each) via
+# avalanche-config.yaml, mounted read-only and passed to every instance as
+# --config-file. Only what must differ per instance -- --role, and for the
+# remote-writers AVALANCHE_REMOTE_URL/AVALANCHE_CONST_LABEL/etc -- is set via
+# command/environment, which both take precedence over the file. There is no
 # series sharding in this build: each scrape-target replica independently
 # generates and exposes the SAME 100,000 series (redundant, not
 # partitioned) -- see openspec/changes/add-instance-roles/design.md Risks.
@@ -21,38 +24,30 @@ x-avalanche-image: &avalanche-image
     dockerfile: Dockerfile
   image: avalanche-instance-roles:local
 
-x-avalanche-env: &avalanche-env
-  AVALANCHE_GAUGE_METRIC_COUNT: "500"
-  AVALANCHE_COUNTER_METRIC_COUNT: "500"
-  AVALANCHE_SERIES_COUNT: "100"
-  AVALANCHE_LABEL_COUNT: "10"
-  AVALANCHE_VALUE_INTERVAL: "30"
-  AVALANCHE_SERIES_INTERVAL: "60"
+x-avalanche-config-volume: &avalanche-config-volume
+  volumes:
+    - ./avalanche-config.yaml:/etc/avalanche/config.yaml:ro
 
 services:
   scrape-target-1:
-    <<: *avalanche-image
-    command: ["--role=scrape-target"]
-    environment: *avalanche-env
+    <<: [*avalanche-image, *avalanche-config-volume]
+    command: ["--config-file=/etc/avalanche/config.yaml", "--role=scrape-target"]
     ports: ["9001:9001"]
 
   scrape-target-2:
-    <<: *avalanche-image
-    command: ["--role=scrape-target"]
-    environment: *avalanche-env
+    <<: [*avalanche-image, *avalanche-config-volume]
+    command: ["--config-file=/etc/avalanche/config.yaml", "--role=scrape-target"]
     ports: ["9002:9001"]
 
   scrape-target-3:
-    <<: *avalanche-image
-    command: ["--role=scrape-target"]
-    environment: *avalanche-env
+    <<: [*avalanche-image, *avalanche-config-volume]
+    command: ["--config-file=/etc/avalanche/config.yaml", "--role=scrape-target"]
     ports: ["9003:9001"]
 
   remote-writer-1:
-    <<: *avalanche-image
-    command: ["--role=remote-writer"]
+    <<: [*avalanche-image, *avalanche-config-volume]
+    command: ["--config-file=/etc/avalanche/config.yaml", "--role=remote-writer"]
     environment:
-      <<: *avalanche-env
       AVALANCHE_REMOTE_URL: "http://prometheus:9090"
       # Default --remote-requests-count=100 makes remote-write a bounded
       # one-off run, after which avalanche exits entirely (the whole process,
@@ -76,10 +71,9 @@ services:
       - prometheus
 
   remote-writer-2:
-    <<: *avalanche-image
-    command: ["--role=remote-writer"]
+    <<: [*avalanche-image, *avalanche-config-volume]
+    command: ["--config-file=/etc/avalanche/config.yaml", "--role=remote-writer"]
     environment:
-      <<: *avalanche-env
       AVALANCHE_REMOTE_URL: "http://prometheus:9090"
       AVALANCHE_REMOTE_REQUESTS_COUNT: "-1"
       AVALANCHE_REMOTE_OUT_OF_ORDER: "false"
@@ -88,12 +82,8 @@ services:
       - prometheus
 
   ruler:
-    <<: *avalanche-image
-    command: ["--role=ruler"]
-    environment:
-      <<: *avalanche-env
-      AVALANCHE_RECORDING_RULE_COUNT: "20"
-      AVALANCHE_ALERTING_RULE_COUNT: "10"
+    <<: [*avalanche-image, *avalanche-config-volume]
+    command: ["--config-file=/etc/avalanche/config.yaml", "--role=ruler"]
     ports: ["9004:9001"]
 
   # One-shot: fetches the ruler's generated rules.yml into a shared volume

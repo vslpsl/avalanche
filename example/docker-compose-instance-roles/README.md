@@ -10,10 +10,14 @@ Prometheus:
   fetched once at startup into Prometheus's `rule_files`.
 
 All six avalanche instances share the exact same metric-generation config
-(~100,000 series each: 500 gauges + 500 counters, 100 series each) via the
-`AVALANCHE_*` environment anchor in [docker-compose.yml](docker-compose.yml)
-— only `--role` (and, for the remote-writers, `AVALANCHE_REMOTE_URL` /
-`AVALANCHE_CONST_LABEL`) differs per instance.
+(~100,000 series each: 500 gauges + 500 counters, 100 series each) via
+[avalanche-config.yaml](avalanche-config.yaml), mounted read-only into every
+instance and passed as `--config-file` (see the main
+[README.md](../../README.md#config-file)). Only what must differ per
+instance — `--role`, and for the remote-writers `AVALANCHE_REMOTE_URL` /
+`AVALANCHE_CONST_LABEL` / etc. — is set via command/environment on top of it,
+which both take precedence over the file (`CLI flag > env var > config file
+> built-in default`).
 
 ## Run it
 
@@ -54,7 +58,7 @@ Then:
   container exits. `-1` keeps it running indefinitely, as you'd want for a
   long-running instance.
 - **Memory.** ~100,000 series costs roughly 150-250MB RSS per avalanche
-  instance in practice. Scale `AVALANCHE_GAUGE_METRIC_COUNT` /
-  `AVALANCHE_COUNTER_METRIC_COUNT` / `AVALANCHE_SERIES_COUNT` up or down to
-  fit your machine — remember every replica of a role pays that cost
+  instance in practice. Scale `gauge-metric-count` / `counter-metric-count` /
+  `series-count` in [avalanche-config.yaml](avalanche-config.yaml) up or down
+  to fit your machine — remember every replica of a role pays that cost
   independently (no sharding).
