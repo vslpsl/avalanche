@@ -73,6 +73,20 @@ Series values are generated using a random source seeded from the current time b
 
 avalanche can also generate Prometheus recording and alerting rules matching its own metric configuration, served over HTTP (see `/rules` below) — see `--recording-rule-count`, `--alerting-rule-count`, `--rule-group-size` and `--rule-eval-interval` in `--help`. The rule set is built once at startup and cached — it does not track subsequent series churn or `--metric-interval` renames. Alerting thresholds are simple heuristics over the `[0,99)` range every metric type is generated with (see `--help`) — treat them as a starting point to tune for your own scenario, not a guarantee of a "meaningful" alert (for example, with the default histogram bucket layout, the generated histogram alert is expected to fire close to continuously).
 
+#### Instance roles
+
+By default (`--role=""`) a single avalanche process runs every subsystem, each gated only by its own trigger flag, exactly as before `--role` existed. Pass `--role` to instead run the process as exactly one subsystem, ignoring every other subsystem's trigger flags even if they're set:
+
+* `--role=scrape-target` — only `/metrics` (+ `/health`). No remote-write, no rule generation/serving.
+* `--role=remote-writer` — only remote-write (+ `/health`). Requires `--remote-url`. No `/metrics`, no rules.
+* `--role=ruler` — only generates and serves rules on `--rules-endpoint-path` (+ `/health`). Requires a non-empty `--rules-endpoint-path`. Doesn't create the series generator at all (saves the memory/CPU a `Collector` would otherwise use).
+
+This lets you split one avalanche configuration across specialized instances (e.g. several `scrape-target` pods, a couple of `remote-writer` pods, and a single `ruler` pod), all sharing the exact same metric/rule configuration and differing only in `--role`.
+
+To make sharing that configuration across many instances easy, every flag (from `--help`) can also be set via an environment variable `AVALANCHE_<FLAG_NAME>` (dashes become underscores, e.g. `--series-count` ↔ `AVALANCHE_SERIES_COUNT`, `--rules-endpoint-path` ↔ `AVALANCHE_RULES_ENDPOINT_PATH`); an explicit CLI flag always overrides the environment variable. The repeatable `--const-label` flag is the one exception: via its env var it only accepts multiple `label=value` pairs as a single string joined by newlines (`\n`), not as CSV or a repeated variable.
+
+A typical Kubernetes deployment: one `ConfigMap` holding the shared `AVALANCHE_*` config (metric/series/label counts, `AVALANCHE_RULES_ENDPOINT_PATH`, etc.), mounted via `envFrom` into three Deployments that differ only in `AVALANCHE_ROLE`/`--role`: N replicas with `scrape-target`, M replicas with `remote-writer` (plus their own `AVALANCHE_REMOTE_URL`), and 1 replica with `ruler`.
+
 ### Endpoints
 
 Three endpoints are available :

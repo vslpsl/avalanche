@@ -35,6 +35,21 @@ import (
 func main() {
 	kingpin.Version(version.Print("avalanche"))
 	log.SetFlags(log.Ltime | log.Lshortfile) // Show file name and line in logs.
+
+	// Let every flag registered below (here and in metricsgen.NewConfigFromFlags/
+	// NewWriteConfigFromFlags) also be set via an AVALANCHE_<FLAG_NAME> env var
+	// (e.g. --series-count <-> AVALANCHE_SERIES_COUNT), so the same config (a
+	// shared ConfigMap of env vars, say) can be handed to many differently
+	// --role'd instances. An explicit CLI flag always overrides the env var.
+	// Exclude --help/--version: DefaultEnvars() would otherwise also wire them
+	// up, and an accidental AVALANCHE_HELP/AVALANCHE_VERSION in a shared
+	// ConfigMap would make every instance sharing it print help/version and
+	// exit instead of running.
+	kingpin.CommandLine.Name = "avalanche"
+	kingpin.CommandLine.DefaultEnvars()
+	kingpin.CommandLine.HelpFlag.NoEnvar()
+	kingpin.CommandLine.VersionFlag.NoEnvar()
+
 	kingpin.CommandLine.Help = "avalanche - metrics test server\n" +
 		"\n" +
 		"Capable of generating metrics to server on \\metrics or send via Remote Write.\n" +
@@ -63,6 +78,15 @@ func main() {
 	cfg := metricsgen.NewConfigFromFlags(kingpin.Flag)
 	port := kingpin.Flag("port", "Port to serve at").Default("9001").Int()
 	writeCfg := metricsgen.NewWriteConfigFromFlags(kingpin.Flag)
+	var role string
+	kingpin.Flag("role", "Exclusive role this instance plays. \"\" (default) runs every "+
+		"subsystem gated only by its own trigger flag (--remote-url, --rules-endpoint-path), "+
+		"exactly as before this flag existed. \"scrape-target\", \"remote-writer\" or \"ruler\" "+
+		"runs ONLY that one subsystem, ignoring the others' trigger flags -- lets many instances "+
+		"share one common config (e.g. via AVALANCHE_* env vars) and differ only in "+
+		"--role/AVALANCHE_ROLE. \"querier\" is reserved for a future querier subsystem.").
+		Default("").
+		EnumVar(&role, "", "scrape-target", "remote-writer", "ruler")
 
 	kingpin.Parse()
 	if err := cfg.Validate(); err != nil {
@@ -71,9 +95,24 @@ func main() {
 	if err := writeCfg.Validate(); err != nil {
 		kingpin.FatalUsage("remote write config validation failed: %v", err)
 	}
+	switch role {
+	case "remote-writer":
+		if writeCfg.URL == nil {
+			kingpin.FatalUsage("--role=remote-writer requires --remote-url to be set")
+		}
+	case "ruler":
+		if cfg.RulesEndpointPath == "" {
+			kingpin.FatalUsage("--role=ruler requires --rules-endpoint-path to be set (non-empty)")
+		}
+	}
+
+	doScrape := role == "" || role == "scrape-target"
+	doRemoteWrite := (role == "" || role == "remote-writer") && writeCfg.URL != nil
+	doRules := (role == "" || role == "ruler") && cfg.RulesEndpointPath != ""
+	needsCollector := doScrape || doRemoteWrite
 
 	var rulesYAML []byte
-	if cfg.RulesEndpointPath != "" {
+	if doRules {
 		var err error
 		rulesYAML, err = metricsgen.GenerateRules(*cfg)
 		if err != nil {
@@ -81,19 +120,22 @@ func main() {
 		}
 	}
 
-	collector := metricsgen.NewCollector(*cfg)
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(collector)
-	writeCfg.UpdateNotify = collector.UpdateNotifyCh()
 
 	log.Println("initializing avalanche...")
 
 	var g run.Group
 	g.Add(run.SignalHandler(context.Background(), os.Interrupt, syscall.SIGTERM))
-	g.Add(collector.Run, collector.Stop)
+
+	if needsCollector {
+		collector := metricsgen.NewCollector(*cfg)
+		reg.MustRegister(collector)
+		writeCfg.UpdateNotify = collector.UpdateNotifyCh()
+		g.Add(collector.Run, collector.Stop)
+	}
 
 	// One-off remote write send mode.
-	if writeCfg.URL != nil {
+	if doRemoteWrite {
 		ctx, cancel := context.WithCancel(context.Background())
 		g.Add(func() error {
 			if err := metricsgen.RunRemoteWriting(ctx, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})), writeCfg, reg); err != nil {
@@ -105,12 +147,14 @@ func main() {
 
 	httpSrv := &http.Server{Addr: fmt.Sprintf(":%v", *port)}
 	g.Add(func() error {
-		fmt.Printf("Serving your metrics at :%v/metrics\n", *port)
-		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
-			EnableOpenMetrics: true,
-		}))
+		if doScrape {
+			fmt.Printf("Serving your metrics at :%v/metrics\n", *port)
+			http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+				EnableOpenMetrics: true,
+			}))
+		}
 		http.HandleFunc("/health", health.New(health.Health{}).Handler)
-		if cfg.RulesEndpointPath != "" {
+		if doRules {
 			fmt.Printf("Serving generated Prometheus rules at :%v%v\n", *port, cfg.RulesEndpointPath)
 			http.HandleFunc(cfg.RulesEndpointPath, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/yaml")
