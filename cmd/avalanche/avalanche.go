@@ -75,11 +75,25 @@ func main() {
 		"                 then returns it to the original count on the next tick. This pattern repeats indefinitely,\n" +
 		"                 creating a spiking effect in the series count.\n"
 
-	cfg := metricsgen.NewConfigFromFlags(kingpin.Flag)
-	port := kingpin.Flag("port", "Port to serve at").Default("9001").Int()
-	writeCfg := metricsgen.NewWriteConfigFromFlags(kingpin.Flag)
+	// Track every flag registered via trackedFlag by name, so a --config-file
+	// (below) can inject its values as that flag's new default before
+	// kingpin.Parse() runs -- kingpin only falls back to a flag's default (or
+	// its env var, checked first) when the flag wasn't explicitly given on
+	// the command line, giving exactly: CLI flag > env var > config file >
+	// built-in default, with no custom "was this set explicitly" tracking
+	// needed on our end.
+	flagClauses := map[string]*kingpin.FlagClause{}
+	trackedFlag := func(name, help string) *kingpin.FlagClause {
+		fc := kingpin.Flag(name, help)
+		flagClauses[name] = fc
+		return fc
+	}
+
+	cfg := metricsgen.NewConfigFromFlags(trackedFlag)
+	port := trackedFlag("port", "Port to serve at").Default("9001").Int()
+	writeCfg := metricsgen.NewWriteConfigFromFlags(trackedFlag)
 	var role string
-	kingpin.Flag("role", "Exclusive role this instance plays. \"\" (default) runs every "+
+	trackedFlag("role", "Exclusive role this instance plays. \"\" (default) runs every "+
 		"subsystem gated only by its own trigger flag (--remote-url, --rules-endpoint-path), "+
 		"exactly as before this flag existed. \"scrape-target\", \"remote-writer\" or \"ruler\" "+
 		"runs ONLY that one subsystem, ignoring the others' trigger flags -- lets many instances "+
@@ -87,6 +101,25 @@ func main() {
 		"--role/AVALANCHE_ROLE. \"querier\" is reserved for a future querier subsystem.").
 		Default("").
 		EnumVar(&role, "", "scrape-target", "remote-writer", "ruler")
+	trackedFlag("config-file", "Optional path to a YAML file providing flag values, keyed by "+
+		"flag name without the leading -- (e.g. \"series-count: 100000\"; a repeatable flag "+
+		"like const-label takes a YAML list). Precedence is CLI flag > env var > this file > "+
+		"built-in default. Also settable via "+configFileEnvar+".").
+		String()
+
+	if path := preScanConfigFilePath(os.Args[1:]); path != "" {
+		fileDefaults, err := loadConfigFileDefaults(path)
+		if err != nil {
+			kingpin.FatalUsage("--config-file: %v", err)
+		}
+		for name, values := range fileDefaults {
+			fc, ok := flagClauses[name]
+			if !ok {
+				kingpin.FatalUsage("--config-file: unknown flag %q", name)
+			}
+			fc.Default(values...)
+		}
+	}
 
 	kingpin.Parse()
 	if err := cfg.Validate(); err != nil {

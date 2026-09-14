@@ -87,6 +87,23 @@ To make sharing that configuration across many instances easy, every flag (from 
 
 A typical Kubernetes deployment: one `ConfigMap` holding the shared `AVALANCHE_*` config (metric/series/label counts, `AVALANCHE_RULES_ENDPOINT_PATH`, etc.), mounted via `envFrom` into three Deployments that differ only in `AVALANCHE_ROLE`/`--role`: N replicas with `scrape-target`, M replicas with `remote-writer` (plus their own `AVALANCHE_REMOTE_URL`), and 1 replica with `ruler`.
 
+#### Config file
+
+Flags can also come from a YAML file: `--config-file=path/to/config.yaml` (or `AVALANCHE_CONFIG_FILE`), keyed by flag name without the leading `--`:
+
+```yaml
+gauge-metric-count: 500
+counter-metric-count: 500
+series-count: 1000
+label-count: 10
+role: scrape-target
+const-label:       # repeatable flags take a YAML list
+  - team=avalanche
+  - env=staging
+```
+
+Precedence is `CLI flag > env var > config file > built-in default` — a value from the file only takes effect where neither an explicit flag nor an env var set it. An unknown key in the file is a startup error.
+
 ### Endpoints
 
 Three endpoints are available :
